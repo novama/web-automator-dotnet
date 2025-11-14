@@ -19,9 +19,6 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<None Update="Config\lambda-config.json">
-			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
-		</None>
 		<None Update="Config\simple-example-config.json">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</None>
