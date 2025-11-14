@@ -1,0 +1,36 @@
+{
+  "_comment": "Lambda Configuration Example",
+  "automation": {
+    "defaultUrl": "https://example.com",
+    "extract": {
+      "heading": true,
+      "headingSelector": "h1",
+      "metadata": true,
+      "selectors": [
+        {
+          "name": "description",
+          "selector": "p",
+          "attribute": "textContent"
+        },
+        {
+          "name": "links",
+          "selector": "a",
+          "attribute": "textContent"
+        }
+      ]
+    }
+  },
+  "playwright": {
+    "browser": "chromium",
+    "timeout": 25000,
+    "navigationTimeout": 25000,
+    "acceptInsecureCerts": true,
+    "windowSize": {
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  "logging": {
+    "level": "info"
+  }
+}

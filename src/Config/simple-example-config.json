@@ -1,0 +1,58 @@
+{
+  "app": {
+    "name": "Web Automator .NET",
+    "version": "1.0.0",
+    "debug": true
+  },
+  "selenium": {
+    "browser": "chrome",
+    "headless": false,
+    "implicitWait": 10000,
+    "pageLoadTimeout": 30000,
+    "windowSize": "1920,1080"
+  },
+  "playwright": {
+    "browser": "chromium",
+    "headless": false,
+    "timeout": 30000,
+    "navigationTimeout": 30000,
+    "acceptInsecureCerts": true,
+    "slowMo": 0,
+    "recordVideo": true,
+    "disableImages": false,
+    "disableJavaScript": false,
+    "windowSize": {
+      "width": 1920,
+      "height": 1080
+    }
+  },
+  "output": {
+    "baseFolder": "./output",
+    "createDirectories": true,
+    "screenshots": {
+      "folder": "screenshots",
+      "format": "png",
+      "includeTimestamp": true
+    },
+    "videos": {
+      "folder": "videos",
+      "format": "mp4",
+      "includeTimestamp": true
+    },
+    "downloads": {
+      "folder": "./downloads"
+    }
+  },
+  "logging": {
+    "level": "info",
+    "directory": "Logs",
+    "enableConsole": true,
+    "enableFile": true
+  },
+  "features": {
+    "enableScreenshots": true,
+    "enableMetrics": true,
+    "enableRetry": true,
+    "maxRetries": 3
+  }
+}
