@@ -1,0 +1,22 @@
+services:
+  # Lambda function container
+  web-automator-lambda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web-automator-lambda
+    ports:
+      - "9000:8080"  # Lambda Runtime Interface Emulator port
+    environment:
+      # Lambda environment variables
+      - ASPNETCORE_ENVIRONMENT=Production
+    volumes:
+      - ./docker-run/logs:/tmp/logs
+      - ./src/WebAutomatorLambdaTest/Config/lambda-config.json:/var/task/config/lambda-config.json
+    networks:
+      - lambda-network
+    tty: true
+
+networks:
+  lambda-network:
+    driver: bridge
