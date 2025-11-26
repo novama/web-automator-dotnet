@@ -1,0 +1,85 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+.github/
+
+# Documentation (not needed in production container)
+docs/
+
+# Node.js dependencies and cache
+node_modules/
+.npm/
+.yarn-integrity
+jspm_packages/
+
+# Node.js logs and debug files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# Runtime output directories (generated during execution)
+output/
+downloads/
+docker-logs/
+
+# Development and testing files
+tests/
+scripts/
+monitor-lambda.js
+test-lambda.js
+lambda-config.json/
+
+# Environment files (should use container environment variables)
+.env*
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker development files (not needed inside container)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+docker-run/
+
+# Build and distribution artifacts
+*.tgz
+*.tar.gz
+coverage/
+
+# Node.js optional files
+.node_repl_history
+
+# Exclude files and directories from Docker build context
+bin/
+obj/
+*.md
+*.git
+*.gitignore
+*.vs
+.vscode
+**/node_modules
+**/logs
+**/downloads
+**/output
+**/runtimes

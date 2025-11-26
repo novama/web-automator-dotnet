@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Configuration;
 
-namespace WebAutomator.Common.Utils;
+namespace WebAutomatorCore.Common.Utils;
 
 /// <summary>
 ///     Configuration manager for loading and accessing JSON configuration files

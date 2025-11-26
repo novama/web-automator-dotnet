@@ -1,7 +1,7 @@
 using Serilog;
 using Serilog.Events;
 
-namespace WebAutomator.Common.Utils;
+namespace WebAutomatorCore.Common.Utils;
 
 /// <summary>
 ///     Factory for creating and configuring Serilog loggers

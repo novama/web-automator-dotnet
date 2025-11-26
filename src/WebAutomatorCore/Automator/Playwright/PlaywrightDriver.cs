@@ -1,44 +1,43 @@
-using OpenQA.Selenium;
-using OpenQA.Selenium.Chrome;
-using OpenQA.Selenium.Edge;
-using OpenQA.Selenium.Firefox;
-using OpenQA.Selenium.Support.UI;
+using Microsoft.Playwright;
 using Serilog;
 
-namespace WebAutomator.Automator.Selenium;
+namespace WebAutomatorCore.Automator.Playwright;
 
 /// <summary>
-///     Configuration options for SeleniumDriver
+///     Configuration options for PlaywrightDriver
 /// </summary>
-public class SeleniumDriverOptions
+public class PlaywrightDriverOptions
 {
-    public string Browser { get; set; } = "chrome";
+    public string Browser { get; set; } = "chromium";
     public bool Headless { get; set; } = true;
     public (int Width, int Height) WindowSize { get; set; } = (1920, 1080);
     public int Timeout { get; set; } = 30000;
-    public int ImplicitWait { get; set; } = 10000;
+    public int NavigationTimeout { get; set; } = 30000;
     public string? UserAgent { get; set; }
     public string DownloadsPath { get; set; } = "./downloads";
     public string OutputPath { get; set; } = "./output";
     public bool DisableImages { get; set; } = false;
     public bool DisableJavaScript { get; set; } = false;
     public bool AcceptInsecureCerts { get; set; } = true;
+    public bool RecordVideo { get; set; } = false;
+    public int SlowMo { get; set; } = 0;
 }
 
 /// <summary>
 ///     Navigation result information
 /// </summary>
-public class SeleniumNavigationResult
+public class NavigationResult
 {
     public string Url { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public bool Success { get; set; }
+    public int Status { get; set; }
 }
 
 /// <summary>
-///     Base Selenium Driver - Core WebDriver wrapper with clean API
+///     Unified Playwright Driver - Modern browser automation with unified API
 /// </summary>
-public class SeleniumDriver : IDisposable
+public class PlaywrightDriver : IAsyncDisposable
 {
     private const string DefaultOutputDirectory = "./output";
     private const string DefaultDownloadsDirectory = "./downloads";
@@ -47,19 +46,22 @@ public class SeleniumDriver : IDisposable
     private readonly string _downloadDirectoryBasePath;
 
     private readonly ILogger _logger;
-    private readonly SeleniumDriverOptions _options;
+    private readonly PlaywrightDriverOptions _options;
     private readonly string _outputDirectoryBasePath;
     private readonly string _screenshotsDirectory;
     private readonly string _videosDirectory;
+
+    private IBrowser? _browser;
+    private IBrowserContext? _context;
     private string? _currentUrl;
-
-    private IWebDriver? _driver;
     private bool _isStarted;
+    private IPage? _page;
+    private IPlaywright? _playwright;
 
-    public SeleniumDriver(ILogger logger, SeleniumDriverOptions? options = null)
+    public PlaywrightDriver(ILogger logger, PlaywrightDriverOptions? options = null)
     {
         _logger = logger;
-        _options = options ?? new SeleniumDriverOptions();
+        _options = options ?? new PlaywrightDriverOptions();
 
         // Initialize directory paths
         // Use current directory as project root (where the application is executed from)
@@ -77,30 +79,42 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Alternative constructor for backward compatibility
     /// </summary>
-    public SeleniumDriver(ILogger logger, string browser, bool headless)
-        : this(logger, new SeleniumDriverOptions { Browser = browser, Headless = headless })
+    public PlaywrightDriver(ILogger logger, string browserType, bool headless)
+        : this(logger, new PlaywrightDriverOptions { Browser = browserType, Headless = headless })
     {
     }
 
     /// <summary>
     ///     Closes the browser and disposes resources
     /// </summary>
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        if (_driver != null)
+        if (_page != null)
         {
-            _logger.Information("Closing Selenium WebDriver");
-            _driver.Quit();
-            _driver.Dispose();
-            _driver = null;
-            _isStarted = false;
+            _logger.Information("Closing Playwright page");
+            await _page.CloseAsync();
+            _page = null;
+        }
+
+        if (_browser != null)
+        {
+            _logger.Information("Closing Playwright browser");
+            await _browser.CloseAsync();
+            _browser = null;
+        }
+
+        if (_playwright != null)
+        {
+            _logger.Information("Disposing Playwright");
+            _playwright.Dispose();
+            _playwright = null;
         }
     }
 
     /// <summary>
-    ///     Start the browser driver
+    ///     Start the browser and create context/page
     /// </summary>
-    public void Start()
+    public async Task StartAsync()
     {
         if (_isStarted)
         {
@@ -112,18 +126,80 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            _driver = _options.Browser.ToLower() switch
+            _playwright = await Microsoft.Playwright.Playwright.CreateAsync();
+
+            // Normalize browser type
+            var normalizedBrowser = _options.Browser.ToLower() switch
             {
-                "chrome" => CreateChromeDriver(),
-                "firefox" => CreateFirefoxDriver(),
-                "edge" => CreateEdgeDriver(),
-                _ => throw new ArgumentException($"Unsupported browser: {_options.Browser}")
+                "chrome" => "chromium",
+                "chromium" => "chromium",
+                "firefox" => "firefox",
+                "webkit" => "webkit",
+                "safari" => "webkit",
+                _ => throw new ArgumentException(
+                    $"Unsupported browser: {_options.Browser}. Supported: chromium, firefox, webkit")
             };
 
+            // Launch browser
+            var launchOptions = new BrowserTypeLaunchOptions
+            {
+                Headless = _options.Headless,
+                SlowMo = _options.SlowMo
+            };
+
+            _browser = normalizedBrowser switch
+            {
+                "chromium" => await _playwright.Chromium.LaunchAsync(launchOptions),
+                "firefox" => await _playwright.Firefox.LaunchAsync(launchOptions),
+                "webkit" => await _playwright.Webkit.LaunchAsync(launchOptions),
+                _ => throw new ArgumentException($"Unsupported browser type: {normalizedBrowser}")
+            };
+
+            // Create browser context with options
+            var contextOptions = new BrowserNewContextOptions
+            {
+                ViewportSize = new ViewportSize
+                {
+                    Width = _options.WindowSize.Width,
+                    Height = _options.WindowSize.Height
+                },
+                IgnoreHTTPSErrors = _options.AcceptInsecureCerts,
+                AcceptDownloads = true
+            };
+
+            // Set user agent if provided
+            if (!string.IsNullOrWhiteSpace(_options.UserAgent)) contextOptions.UserAgent = _options.UserAgent;
+
+            // Configure video recording if enabled
+            if (_options.RecordVideo)
+            {
+                var videoDirInfo = await CreateVideosDirectoryAsync();
+                contextOptions.RecordVideoDir = videoDirInfo.VideosPath;
+                contextOptions.RecordVideoSize = new RecordVideoSize
+                {
+                    Width = _options.WindowSize.Width,
+                    Height = _options.WindowSize.Height
+                };
+            }
+
+            _context = await _browser.NewContextAsync(contextOptions);
+
             // Set timeouts
-            _driver.Manage().Timeouts().ImplicitWait = TimeSpan.FromMilliseconds(_options.ImplicitWait);
-            _driver.Manage().Timeouts().PageLoad = TimeSpan.FromMilliseconds(_options.Timeout);
-            _driver.Manage().Timeouts().AsynchronousJavaScript = TimeSpan.FromMilliseconds(_options.Timeout);
+            _context.SetDefaultTimeout(_options.Timeout);
+            _context.SetDefaultNavigationTimeout(_options.NavigationTimeout);
+
+            // Create page
+            _page = await _context.NewPageAsync();
+
+            // Configure page-level settings
+            if (_options.DisableImages)
+                await _page.RouteAsync("**/*", async route =>
+                {
+                    if (route.Request.ResourceType == "image")
+                        await route.AbortAsync();
+                    else
+                        await route.ContinueAsync();
+                });
 
             _isStarted = true;
             _logger.Information("Browser driver started successfully");
@@ -136,114 +212,20 @@ public class SeleniumDriver : IDisposable
     }
 
     /// <summary>
-    ///     Initializes the Selenium WebDriver (backward compatibility)
+    ///     Initializes the Playwright browser and page (backward compatibility)
     /// </summary>
-    [Obsolete("Use Start() instead")]
-    public void Initialize()
+    [Obsolete("Use StartAsync() instead")]
+    public Task InitializeAsync()
     {
-        Start();
-    }
-
-    private IWebDriver CreateChromeDriver()
-    {
-        var options = new ChromeOptions();
-
-        if (_options.Headless)
-            options.AddArgument("--headless=new");
-
-        options.AddArguments(
-            $"--window-size={_options.WindowSize.Width},{_options.WindowSize.Height}",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-web-security",
-            "--allow-running-insecure-content"
-        );
-
-        if (!string.IsNullOrWhiteSpace(_options.UserAgent))
-            options.AddArgument($"--user-agent={_options.UserAgent}");
-
-        if (_options.DisableImages)
-            options.AddArgument("--blink-settings=imagesEnabled=false");
-
-        if (_options.DisableJavaScript)
-            options.AddArgument("--disable-javascript");
-
-        // Configure download directory
-        if (!string.IsNullOrEmpty(_options.DownloadsPath))
-        {
-            options.AddUserProfilePreference("download.default_directory", _downloadDirectoryBasePath);
-            options.AddUserProfilePreference("download.prompt_for_download", false);
-            options.AddUserProfilePreference("download.directory_upgrade", true);
-            options.AddUserProfilePreference("safebrowsing.enabled", true);
-
-            Directory.CreateDirectory(_downloadDirectoryBasePath);
-            _logger.Information($"Chrome download directory set to: {_downloadDirectoryBasePath}");
-        }
-
-        return new ChromeDriver(options);
-    }
-
-    private IWebDriver CreateFirefoxDriver()
-    {
-        var options = new FirefoxOptions();
-
-        if (_options.Headless)
-            options.AddArgument("--headless");
-
-        options.AddArguments(
-            $"--width={_options.WindowSize.Width}",
-            $"--height={_options.WindowSize.Height}"
-        );
-
-        // Configure download directory
-        if (!string.IsNullOrEmpty(_options.DownloadsPath))
-        {
-            options.SetPreference("browser.download.dir", _downloadDirectoryBasePath);
-            options.SetPreference("browser.download.folderList", 2);
-            options.SetPreference("browser.download.useDownloadDir", true);
-            options.SetPreference("browser.helperApps.neverAsk.saveToDisk",
-                "application/pdf,application/zip,text/csv,application/xml,application/octet-stream");
-
-            Directory.CreateDirectory(_downloadDirectoryBasePath);
-            _logger.Information($"Firefox download directory set to: {_downloadDirectoryBasePath}");
-        }
-
-        return new FirefoxDriver(options);
-    }
-
-    private IWebDriver CreateEdgeDriver()
-    {
-        var options = new EdgeOptions();
-
-        if (_options.Headless)
-            options.AddArgument("--headless");
-
-        options.AddArguments(
-            $"--window-size={_options.WindowSize.Width},{_options.WindowSize.Height}"
-        );
-
-        // Configure download directory
-        if (!string.IsNullOrEmpty(_options.DownloadsPath))
-        {
-            options.AddUserProfilePreference("download.default_directory", _downloadDirectoryBasePath);
-            options.AddUserProfilePreference("download.prompt_for_download", false);
-            options.AddUserProfilePreference("download.directory_upgrade", true);
-            options.AddUserProfilePreference("safebrowsing.enabled", true);
-
-            Directory.CreateDirectory(_downloadDirectoryBasePath);
-            _logger.Information($"Edge download directory set to: {_downloadDirectoryBasePath}");
-        }
-
-        return new EdgeDriver(options);
+        return StartAsync();
     }
 
     /// <summary>
-    ///     Stop and quit the browser driver
+    ///     Stop and close the browser
     /// </summary>
-    public void Quit()
+    public async Task QuitAsync()
     {
-        if (!_isStarted || _driver == null)
+        if (!_isStarted)
         {
             _logger.Warning("Driver not started or already quit");
             return;
@@ -251,9 +233,24 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            _driver.Quit();
-            _driver.Dispose();
-            _driver = null;
+            if (_page != null)
+            {
+                await _page.CloseAsync();
+                _page = null;
+            }
+
+            if (_context != null)
+            {
+                await _context.CloseAsync();
+                _context = null;
+            }
+
+            if (_browser != null)
+            {
+                await _browser.CloseAsync();
+                _browser = null;
+            }
+
             _isStarted = false;
             _currentUrl = null;
             _logger.Information("Browser driver quit successfully");
@@ -268,7 +265,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Navigate to a URL
     /// </summary>
-    public SeleniumNavigationResult NavigateTo(string url)
+    public async Task<NavigationResult> NavigateToAsync(string url)
     {
         EnsureStarted();
 
@@ -276,15 +273,21 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            _driver!.Navigate().GoToUrl(url);
+            var response = await _page!.GotoAsync(url, new PageGotoOptions
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = _options.NavigationTimeout
+            });
+
             _currentUrl = url;
             _logger.Information("Navigation completed successfully");
 
-            return new SeleniumNavigationResult
+            return new NavigationResult
             {
-                Url = _driver.Url,
-                Title = _driver.Title,
-                Success = true
+                Url = _page.Url,
+                Title = await _page.TitleAsync(),
+                Success = response?.Ok ?? false,
+                Status = response?.Status ?? 0
             };
         }
         catch (Exception ex)
@@ -297,26 +300,32 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Navigates to the specified URL (backward compatibility)
     /// </summary>
-    [Obsolete("Use NavigateTo() instead")]
+    [Obsolete("Use NavigateToAsync() instead")]
     public async Task GoToAsync(string url)
     {
-        await Task.Run(() => NavigateTo(url));
+        await NavigateToAsync(url);
     }
 
     /// <summary>
     ///     Find a single element by selector
     /// </summary>
-    public IWebElement FindElement(string selector, int? timeout = null)
+    public async Task<IElementHandle?> FindElementAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
         try
         {
             var timeoutMs = timeout ?? _options.Timeout;
-            var by = ParseSelector(selector);
+            var element = await _page!.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions
+            {
+                Timeout = timeoutMs,
+                State = WaitForSelectorState.Attached
+            });
 
-            var wait = new WebDriverWait(_driver!, TimeSpan.FromMilliseconds(timeoutMs));
-            return wait.Until(drv => drv.FindElement(by));
+            if (element == null)
+                throw new Exception($"Element not found: {selector}");
+
+            return element;
         }
         catch (Exception ex)
         {
@@ -328,58 +337,33 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Find multiple elements by selector
     /// </summary>
-    public IReadOnlyCollection<IWebElement> FindElements(string selector)
+    public async Task<IReadOnlyList<ILocator>> FindElementsAsync(string selector)
     {
         EnsureStarted();
 
         try
         {
-            var by = ParseSelector(selector);
-            return _driver!.FindElements(by);
+            return await _page!.Locator(selector).AllAsync();
         }
         catch (Exception ex)
         {
             _logger.Error(ex, $"Elements not found: {selector}");
-            return Array.Empty<IWebElement>();
+            return Array.Empty<ILocator>();
         }
-    }
-
-    /// <summary>
-    ///     Parse selector string to By object
-    /// </summary>
-    private By ParseSelector(string selector)
-    {
-        // Support different selector types
-        if (selector.StartsWith("//") || selector.StartsWith("(//"))
-            return By.XPath(selector);
-        if (selector.StartsWith("#"))
-            return By.Id(selector.Substring(1));
-        if (selector.StartsWith("."))
-            return By.ClassName(selector.Substring(1));
-        if (selector.Contains("="))
-        {
-            var parts = selector.Split('=', 2);
-            return By.CssSelector($"[{parts[0]}=\"{parts[1]}\"]");
-        }
-
-        return By.CssSelector(selector);
     }
 
     /// <summary>
     ///     Click an element
     /// </summary>
-    public (bool Success, string Selector) Click(string selector, int? timeout = null)
+    public async Task<(bool Success, string Selector)> ClickAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
         try
         {
-            var element = FindElement(selector, timeout);
-            var wait = new WebDriverWait(_driver!, TimeSpan.FromMilliseconds(timeout ?? _options.Timeout));
-            wait.Until(drv => element.Enabled);
-            element.Click();
+            var timeoutMs = timeout ?? _options.Timeout;
+            await _page!.ClickAsync(selector, new PageClickOptions { Timeout = timeoutMs });
             _logger.Information($"Clicked element: {selector}");
-
             return (true, selector);
         }
         catch (Exception ex)
@@ -392,18 +376,16 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Send keys to an element
     /// </summary>
-    public (bool Success, string Selector, string Text) SendKeys(string selector, string text, int? timeout = null)
+    public async Task<(bool Success, string Selector, string Text)> SendKeysAsync(string selector, string text,
+        int? timeout = null)
     {
         EnsureStarted();
 
         try
         {
-            var element = FindElement(selector, timeout);
-            var wait = new WebDriverWait(_driver!, TimeSpan.FromMilliseconds(timeout ?? _options.Timeout));
-            wait.Until(drv => element.Enabled);
-            element.SendKeys(text);
+            var timeoutMs = timeout ?? _options.Timeout;
+            await _page!.FillAsync(selector, text, new PageFillOptions { Timeout = timeoutMs });
             _logger.Information($"Sent keys to element: {selector}");
-
             return (true, selector, text);
         }
         catch (Exception ex)
@@ -414,18 +396,26 @@ public class SeleniumDriver : IDisposable
     }
 
     /// <summary>
+    ///     Types text into an input element (backward compatibility)
+    /// </summary>
+    [Obsolete("Use SendKeysAsync() instead")]
+    public async Task TypeAsync(string selector, string text)
+    {
+        await SendKeysAsync(selector, text);
+    }
+
+    /// <summary>
     ///     Clear text from an element
     /// </summary>
-    public (bool Success, string Selector) ClearText(string selector, int? timeout = null)
+    public async Task<(bool Success, string Selector)> ClearTextAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
         try
         {
-            var element = FindElement(selector, timeout);
-            element.Clear();
+            var timeoutMs = timeout ?? _options.Timeout;
+            await _page!.FillAsync(selector, "", new PageFillOptions { Timeout = timeoutMs });
             _logger.Information($"Cleared text from element: {selector}");
-
             return (true, selector);
         }
         catch (Exception ex)
@@ -438,14 +428,15 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Get text content from an element
     /// </summary>
-    public string GetText(string selector, int? timeout = null)
+    public async Task<string> GetTextAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
         try
         {
-            var element = FindElement(selector, timeout);
-            return element.Text;
+            var timeoutMs = timeout ?? _options.Timeout;
+            var text = await _page!.TextContentAsync(selector, new PageTextContentOptions { Timeout = timeoutMs });
+            return text ?? "";
         }
         catch (Exception ex)
         {
@@ -457,12 +448,12 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Gets text content from an element (backward compatibility)
     /// </summary>
-    [Obsolete("Use GetText() instead")]
-    public string? GetElementText(string selector)
+    [Obsolete("Use GetTextAsync() instead")]
+    public async Task<string?> GetElementTextAsync(string selector)
     {
         try
         {
-            return GetText(selector);
+            return await GetTextAsync(selector);
         }
         catch
         {
@@ -473,15 +464,18 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Gets an attribute value from an element
     /// </summary>
-    public string? GetElementAttribute(string selector, string attributeName)
+    public async Task<string?> GetElementAttributeAsync(string selector, string attributeName)
     {
+        EnsureStarted();
+
         try
         {
-            var element = FindElement(selector);
-            return element.GetAttribute(attributeName);
+            var attribute = await _page!.GetAttributeAsync(selector, attributeName);
+            return attribute;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.Warning(ex, $"Failed to get attribute '{attributeName}' for: {selector}");
             return null;
         }
     }
@@ -489,7 +483,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Wait for an element to be present
     /// </summary>
-    public (bool Success, string Selector) WaitForElement(string selector, int? timeout = null)
+    public async Task<(bool Success, string Selector)> WaitForElementAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
@@ -497,7 +491,11 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            FindElement(selector, timeoutMs);
+            await _page!.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions
+            {
+                Timeout = timeoutMs,
+                State = WaitForSelectorState.Attached
+            });
             return (true, selector);
         }
         catch
@@ -509,7 +507,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Wait for an element to be visible
     /// </summary>
-    public (bool Success, string Selector) WaitForVisible(string selector, int? timeout = null)
+    public async Task<(bool Success, string Selector)> WaitForVisibleAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
@@ -517,9 +515,11 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            var element = FindElement(selector, timeoutMs);
-            var wait = new WebDriverWait(_driver!, TimeSpan.FromMilliseconds(timeoutMs));
-            wait.Until(drv => element.Displayed);
+            await _page!.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions
+            {
+                Timeout = timeoutMs,
+                State = WaitForSelectorState.Visible
+            });
             return (true, selector);
         }
         catch
@@ -531,7 +531,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Wait for an element to be clickable
     /// </summary>
-    public (bool Success, string Selector) WaitForClickable(string selector, int? timeout = null)
+    public async Task<(bool Success, string Selector)> WaitForClickableAsync(string selector, int? timeout = null)
     {
         EnsureStarted();
 
@@ -539,15 +539,31 @@ public class SeleniumDriver : IDisposable
 
         try
         {
-            var element = FindElement(selector, timeoutMs);
-            var wait = new WebDriverWait(_driver!, TimeSpan.FromMilliseconds(timeoutMs));
-            wait.Until(drv => element.Enabled);
+            await _page!.WaitForSelectorAsync(selector, new PageWaitForSelectorOptions
+            {
+                Timeout = timeoutMs,
+                State = WaitForSelectorState.Visible
+            });
+
+            var isEnabled = await _page.IsEnabledAsync(selector);
+            if (!isEnabled)
+                throw new Exception("Element is disabled");
+
             return (true, selector);
         }
         catch
         {
             throw new Exception($"Element not clickable within {timeoutMs}ms: {selector}");
         }
+    }
+
+    /// <summary>
+    ///     Waits for an element to be visible (backward compatibility)
+    /// </summary>
+    [Obsolete("Use WaitForVisibleAsync() instead")]
+    public async Task WaitForSelectorAsync(string selector, int timeout = 30000)
+    {
+        await WaitForVisibleAsync(selector, timeout);
     }
 
     /// <summary>
@@ -566,28 +582,31 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Take a screenshot with configured output directory
     /// </summary>
-    public string? TakeScreenshot(string? filename = null, bool includeTimestamp = true,
+    public async Task<string?> TakeScreenshotAsync(string? filename = null, bool includeTimestamp = true,
         string? baseDirectory = null, string? screenshotsDirectory = null)
     {
         EnsureStarted();
 
         try
         {
-            var screenshot = ((ITakesScreenshot)_driver!).GetScreenshot();
-
             if (filename != null)
             {
                 var actualBaseDirectory = baseDirectory ?? _outputDirectoryBasePath;
                 var actualScreenshotsDirectory = screenshotsDirectory ?? _screenshotsDirectory;
 
-                var paths = CreateScreenshotsDirectory(actualBaseDirectory, actualScreenshotsDirectory);
+                var paths = await CreateScreenshotsDirectoryAsync(actualBaseDirectory, actualScreenshotsDirectory);
                 var finalFilename = GenerateFilename(filename, includeTimestamp);
 
                 var filepath = Path.Combine(paths.ScreenshotsPath, finalFilename);
                 var ext = Path.GetExtension(filepath);
                 var finalPath = string.IsNullOrEmpty(ext) ? $"{filepath}.png" : filepath;
 
-                screenshot.SaveAsFile(finalPath);
+                await _page!.ScreenshotAsync(new PageScreenshotOptions
+                {
+                    Path = finalPath,
+                    FullPage = true
+                });
+
                 _logger.Information($"Screenshot saved: {finalPath}");
                 return finalPath;
             }
@@ -604,7 +623,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Create the screenshots output directory
     /// </summary>
-    public (string ScreenshotsPath, string BaseDirectory) CreateScreenshotsDirectory(
+    public async Task<(string ScreenshotsPath, string BaseDirectory)> CreateScreenshotsDirectoryAsync(
         string? baseDirectory = null, string? screenshotsDirectory = null, bool createDirectories = true)
     {
         try
@@ -633,7 +652,7 @@ public class SeleniumDriver : IDisposable
     /// <summary>
     ///     Create videos output directory
     /// </summary>
-    public (string VideosPath, string BaseDirectory) CreateVideosDirectory(
+    public async Task<(string VideosPath, string BaseDirectory)> CreateVideosDirectoryAsync(
         string? baseDirectory = null, string? videosDirectory = null, bool createDirectories = true)
     {
         try
@@ -660,209 +679,9 @@ public class SeleniumDriver : IDisposable
     }
 
     /// <summary>
-    ///     Start video recording (NOT YET IMPLEMENTED)
-    /// </summary>
-    public void StartVideoRecording(string filename = "recording.mp4", string? baseDirectory = null,
-        string? videosDirectory = null, bool includeTimestamp = true)
-    {
-        var actualBaseDirectory = baseDirectory ?? _outputDirectoryBasePath;
-        var actualVideosDirectory = videosDirectory ?? _videosDirectory;
-
-        CreateVideosDirectory(actualBaseDirectory, actualVideosDirectory);
-
-        throw new NotImplementedException(
-            "Video recording not yet implemented. Use StartVideoRecording() when this feature is added.");
-    }
-
-    /// <summary>
-    ///     Stop video recording (NOT YET IMPLEMENTED)
-    /// </summary>
-    public void StopVideoRecording()
-    {
-        throw new NotImplementedException(
-            "Video recording not yet implemented. Use StopVideoRecording() when this feature is added.");
-    }
-
-    /// <summary>
-    ///     Get page source HTML
-    /// </summary>
-    public string GetPageSource()
-    {
-        EnsureStarted();
-
-        try
-        {
-            return _driver!.PageSource;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Get page source failed");
-            throw new Exception($"Failed to get page source: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Get current page title
-    /// </summary>
-    public string GetTitle()
-    {
-        EnsureStarted();
-
-        try
-        {
-            return _driver!.Title;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Get title failed");
-            throw new Exception($"Failed to get page title: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Get current URL
-    /// </summary>
-    public string GetCurrentUrl()
-    {
-        EnsureStarted();
-
-        try
-        {
-            _currentUrl = _driver!.Url;
-            return _currentUrl;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Get current URL failed");
-            throw new Exception($"Failed to get current URL: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Navigate back in browser history
-    /// </summary>
-    public void GoBack()
-    {
-        EnsureStarted();
-
-        try
-        {
-            _driver!.Navigate().Back();
-            _currentUrl = GetCurrentUrl();
-            _logger.Information("Navigated back");
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Go back failed");
-            throw new Exception($"Failed to go back: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Navigate forward in browser history
-    /// </summary>
-    public void GoForward()
-    {
-        EnsureStarted();
-
-        try
-        {
-            _driver!.Navigate().Forward();
-            _currentUrl = GetCurrentUrl();
-            _logger.Information("Navigated forward");
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Go forward failed");
-            throw new Exception($"Failed to go forward: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Refresh the current page
-    /// </summary>
-    public void Refresh()
-    {
-        EnsureStarted();
-
-        try
-        {
-            _driver!.Navigate().Refresh();
-            _logger.Information("Page refreshed");
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Refresh failed");
-            throw new Exception($"Failed to refresh page: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Execute JavaScript in the browser
-    /// </summary>
-    public T ExecuteScript<T>(string script, params object[] args)
-    {
-        EnsureStarted();
-
-        try
-        {
-            var jsExecutor = (IJavaScriptExecutor)_driver!;
-            var result = jsExecutor.ExecuteScript(script, args);
-            return (T)result;
-        }
-        catch (Exception ex)
-        {
-            _logger.Error(ex, "Execute script failed");
-            throw new Exception($"Failed to execute script: {ex.Message}", ex);
-        }
-    }
-
-    /// <summary>
-    ///     Wait for a specified amount of time
-    /// </summary>
-    public void Wait(int milliseconds)
-    {
-        Thread.Sleep(milliseconds);
-    }
-
-    /// <summary>
-    ///     Waits for the specified number of milliseconds (backward compatibility)
-    /// </summary>
-    [Obsolete("Use Wait() instead")]
-    public async Task WaitAsync(int milliseconds)
-    {
-        await Task.Delay(milliseconds);
-    }
-
-    /// <summary>
-    ///     Check if driver is started
-    /// </summary>
-    public bool GetIsStarted()
-    {
-        return _isStarted;
-    }
-
-    /// <summary>
-    ///     Get driver options
-    /// </summary>
-    public SeleniumDriverOptions GetOptions()
-    {
-        return _options;
-    }
-
-    /// <summary>
-    ///     Get current output directory configuration
-    /// </summary>
-    public (string BaseDirectory, string ScreenshotsDirectory, string VideosDirectory, string DownloadDirectory)
-        GetOutputDirectoryConfig()
-    {
-        return (_outputDirectoryBasePath, _screenshotsDirectory, _videosDirectory, _downloadDirectoryBasePath);
-    }
-
-    /// <summary>
     ///     Get or create the download directory
     /// </summary>
-    public string GetDownloadDirectory(string? downloadsPath = null, bool createDirectory = true)
+    public async Task<string> GetDownloadDirectoryAsync(string? downloadsPath = null, bool createDirectory = true)
     {
         try
         {
@@ -887,12 +706,239 @@ public class SeleniumDriver : IDisposable
     }
 
     /// <summary>
-    ///     Get the underlying WebDriver instance for advanced operations
+    ///     Start video recording
     /// </summary>
-    public IWebDriver GetWebDriver()
+    public Task StartVideoRecordingAsync(string filename = "recording.webm", string? baseDirectory = null,
+        string? videosDirectory = null, bool includeTimestamp = true)
     {
         EnsureStarted();
-        return _driver!;
+
+        _logger.Warning(
+            "Video recording should be enabled at browser start. Use RecordVideo: true in options and restart browser.");
+
+        if (!_options.RecordVideo)
+            throw new Exception(
+                "Video recording not enabled. Set RecordVideo: true in options and restart browser.");
+
+        _logger.Information("Video recording is active (managed by Playwright context)");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    ///     Stop video recording and get video path
+    /// </summary>
+    public async Task<string> StopVideoRecordingAsync()
+    {
+        EnsureStarted();
+
+        if (!_options.RecordVideo)
+            throw new Exception("Video recording not enabled");
+
+        try
+        {
+            var videoPath = await _page!.Video!.PathAsync();
+            _logger.Information($"Video recording saved: {videoPath}");
+            return videoPath;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to get video path");
+            throw new Exception($"Failed to stop video recording: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Get page source HTML
+    /// </summary>
+    public async Task<string> GetPageSourceAsync()
+    {
+        EnsureStarted();
+
+        try
+        {
+            return await _page!.ContentAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Get page source failed");
+            throw new Exception($"Failed to get page source: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Gets the current page title
+    /// </summary>
+    public async Task<string> GetTitleAsync()
+    {
+        EnsureStarted();
+
+        try
+        {
+            var title = await _page!.TitleAsync();
+            _logger.Information($"Page title: {title}");
+            return title;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Get title failed");
+            throw new Exception($"Failed to get page title: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Get current URL
+    /// </summary>
+    public string GetCurrentUrl()
+    {
+        EnsureStarted();
+
+        try
+        {
+            _currentUrl = _page!.Url;
+            return _currentUrl;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Get current URL failed");
+            throw new Exception($"Failed to get current URL: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Navigate back in browser history
+    /// </summary>
+    public async Task GoBackAsync()
+    {
+        EnsureStarted();
+
+        try
+        {
+            await _page!.GoBackAsync();
+            _currentUrl = _page.Url;
+            _logger.Information("Navigated back");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Go back failed");
+            throw new Exception($"Failed to go back: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Navigate forward in browser history
+    /// </summary>
+    public async Task GoForwardAsync()
+    {
+        EnsureStarted();
+
+        try
+        {
+            await _page!.GoForwardAsync();
+            _currentUrl = _page.Url;
+            _logger.Information("Navigated forward");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Go forward failed");
+            throw new Exception($"Failed to go forward: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Refresh the current page
+    /// </summary>
+    public async Task RefreshAsync()
+    {
+        EnsureStarted();
+
+        try
+        {
+            await _page!.ReloadAsync();
+            _logger.Information("Page refreshed");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Refresh failed");
+            throw new Exception($"Failed to refresh page: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Execute JavaScript in the browser
+    /// </summary>
+    public async Task<T> ExecuteScriptAsync<T>(string script, params object[] args)
+    {
+        EnsureStarted();
+
+        try
+        {
+            return await _page!.EvaluateAsync<T>(script, args);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Execute script failed");
+            throw new Exception($"Failed to execute script: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    ///     Wait for a specified amount of time
+    /// </summary>
+    public async Task WaitAsync(int milliseconds)
+    {
+        await Task.Delay(milliseconds);
+    }
+
+    /// <summary>
+    ///     Check if driver is started
+    /// </summary>
+    public bool GetIsStarted()
+    {
+        return _isStarted;
+    }
+
+    /// <summary>
+    ///     Get driver options
+    /// </summary>
+    public PlaywrightDriverOptions GetOptions()
+    {
+        return _options;
+    }
+
+    /// <summary>
+    ///     Get current output directory configuration
+    /// </summary>
+    public (string BaseDirectory, string ScreenshotsDirectory, string VideosDirectory, string DownloadDirectory)
+        GetOutputDirectoryConfig()
+    {
+        return (_outputDirectoryBasePath, _screenshotsDirectory, _videosDirectory, _downloadDirectoryBasePath);
+    }
+
+    /// <summary>
+    ///     Get the underlying Playwright Page instance for advanced operations
+    /// </summary>
+    public IPage GetPage()
+    {
+        EnsureStarted();
+        return _page!;
+    }
+
+    /// <summary>
+    ///     Get the underlying Playwright Browser Context for advanced operations
+    /// </summary>
+    public IBrowserContext GetContext()
+    {
+        EnsureStarted();
+        return _context!;
+    }
+
+    /// <summary>
+    ///     Get the underlying Playwright Browser instance for advanced operations
+    /// </summary>
+    public IBrowser GetBrowser()
+    {
+        EnsureStarted();
+        return _browser!;
     }
 
     /// <summary>
@@ -900,7 +946,7 @@ public class SeleniumDriver : IDisposable
     /// </summary>
     private void EnsureStarted()
     {
-        if (!_isStarted || _driver == null)
-            throw new InvalidOperationException("Driver not started. Call Start() first.");
+        if (!_isStarted || _page == null)
+            throw new InvalidOperationException("Driver not started. Call StartAsync() first.");
     }
 }

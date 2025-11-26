@@ -1,5 +1,5 @@
-using WebAutomator.Automator.Selenium;
-using WebAutomator.Common.Utils;
+using WebAutomatorCore.Automator.Selenium;
+using WebAutomatorCore.Common.Utils;
 
 namespace WebAutomator.Examples;
 

@@ -1,5 +1,5 @@
-using WebAutomator.Automator.Playwright;
-using WebAutomator.Common.Utils;
+using WebAutomatorCore.Automator.Playwright;
+using WebAutomatorCore.Common.Utils;
 
 namespace WebAutomator.Examples;
 
